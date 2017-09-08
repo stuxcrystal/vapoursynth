@@ -1493,29 +1493,18 @@ cdef Core createCore():
     return instance
 
 def get_core(threads = None, add_cache = None, accept_lowercase = None):
-    global _using_vsscript
-    ret_core = None
-    if _using_vsscript:
-        global _cores
-        global _environment_id
-        if _environment_id is None:
-            raise Error('Internal environment id not set. Was get_core() called from a filter callback?')
-
-        if not _environment_id in _cores:
-            _cores[_environment_id] = createCore()
-        ret_core = _cores[_environment_id]
-    else:
-        global _core
-        if _core is None:
-            _core = createCore()
-        ret_core = _core
-    if ret_core is not None:
-        if threads is not None:
-            ret_core.num_threads = threads
-        if add_cache is not None:
-            ret_core.add_cache = add_cache
-        if accept_lowercase is not None:
-            ret_core.accept_lowercase = accept_lowercase
+    global core
+    ret_core = core.core
+    if ret_core is None:
+        return None
+    
+    if threads is not None:
+        ret_core.num_threads = threads
+    if add_cache is not None:
+        ret_core.add_cache = add_cache
+    if accept_lowercase is not None:
+        ret_core.accept_lowercase = accept_lowercase
+        
     return ret_core
     
 cdef object vsscript_get_core_internal(int environment_id):
@@ -1531,7 +1520,23 @@ cdef class _CoreProxy(object):
     
     @property
     def core(self):
-        return get_core()
+        global _using_vsscript
+        ret_core = None
+        if _using_vsscript:
+            global _cores
+            global _environment_id
+            if _environment_id is None:
+                raise Error('Internal environment id not set. Was get_core() called from a filter callback?')
+
+            if not _environment_id in _cores:
+                _cores[_environment_id] = createCore()
+            ret_core = _cores[_environment_id]
+        else:
+            global _core
+            if _core is None:
+                _core = createCore()
+            ret_core = _core
+        return ret_core
         
     def __dir__(self):
         d = dir(self.core)
