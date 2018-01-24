@@ -1,3 +1,4 @@
+
 #define AppName = 'VapourSynth'
 #define Version = 'R43'
 
@@ -48,15 +49,15 @@ Name: newvpyfile; Description: "Add 'New VapourSynth Python Script' option to sh
 
 [Run]
 Filename: "{app}\pismo\pfm-190-vapoursynth-win.exe"; Parameters: "install"; Flags: runhidden; Components: pismo
+Filename: "{code:GetPythonPath32}\python.exe"; Parameters: "-m pip install {app}\dist\VapourSynth-{#= Version}-cp36-cp36m-win32.whl"; Flags: runhidden; Components: vs32
+Filename: "{code:GetPythonPath64}\python.exe"; Parameters: "-m pip install {app}\dist\VapourSynth-{#= Version}-cp36-cp36m-win32_amd64.whl"; Flags: runhidden; Components: vs64
 
 [Files]
 ;core binaries
 Source: template.vpy; DestDir: {app}; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32 vs64
-Source: vapoursynth.pth; DestDir: {code:GetPythonPath32}\Lib\site-packages; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32
-Source: vapoursynth.pth; DestDir: {code:GetPythonPath64}\Lib\site-packages; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs64
 
-Source: ..\vapoursynth.cp36-win32.pyd; DestDir: {code:GetPythonPath32}\Lib\site-packages\vapoursynth; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32
-Source: ..\vapoursynth.cp36-win_amd64.pyd; DestDir: {code:GetPythonPath64}\Lib\site-packages\vapoursynth; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs64
+Source: ..\dist\VapourSynth-{#= Version}-cp36-cp36m-win32.whl; DestDir: {app}\dist; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32
+Source: ..\dist\VapourSynth-{#= Version}-cp36-cp36m-win32_amd64.whl; DestDir: {app}\dist; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs64
 
 Source: ..\msvc_project\Release\vapoursynth.dll; DestDir: {app}\core32; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32
 Source: ..\msvc_project\Release\vapoursynth.pdb; DestDir: {app}\core32; Flags: ignoreversion uninsrestartdelete restartreplace; Components: vs32
@@ -77,7 +78,8 @@ Source: ..\msvc_project\x64\Release\vsscript.dll; DestDir: {app}\core64; Flags: 
 Source: ..\msvc_project\Release\vsscript.dll; DestDir: {sys}; Flags: uninsrestartdelete restartreplace 32bit; Components: vs32
 Source: ..\msvc_project\x64\Release\vsscript.dll; DestDir: {sys}; Flags: uninsrestartdelete restartreplace 64bit; Components: vs64
 
-;docsSource: ..\doc\_build\html\*; DestDir: {app}\docs; Flags: ignoreversion uninsrestartdelete restartreplace recursesubdirs; Components: docs
+;docs
+Source: ..\doc\_build\html\*; DestDir: {app}\docs; Flags: ignoreversion uninsrestartdelete restartreplace recursesubdirs; Components: docs
 
 ;sdk
 Source: ..\include\VapourSynth.h; DestDir: {app}\sdk\include\vapoursynth; Flags: ignoreversion uninsrestartdelete restartreplace; Components: sdk
@@ -190,7 +192,8 @@ Type: dirifempty; Name: "{code:GetPythonPath64}\Lib\site-packages\vapoursynth"; 
 #include "scripts\products\vcredist2013.iss"
 #include "scripts\products\vcredist2017.iss"
 
-[Code]function CreateSymbolicLink(
+[Code]
+function CreateSymbolicLink(
   lpSymlinkFileName: string;
   lpTargetFileName: string;
   dwFlags: DWORD): Boolean;
