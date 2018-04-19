@@ -31,6 +31,7 @@ import traceback
 import gc
 import sys
 import inspect
+import weakref
 from types import MappingProxyType
 from contextlib import contextmanager
 from collections import namedtuple
@@ -73,14 +74,29 @@ cdef within_environment(newEnvironmentId):
         _environment_id = _environment_id_stack.pop()
 
 
-def _environment():
+def get_environment():
     """
     This function is for Python-based VSScript-Editors. It allows to easily
     switch to a different environment depending.
 
     This function gives you great power, use it wisely. :)
     """
-    return lambda: within_environment(_environment_id)
+    environment = _environment_id
+
+    # Create a "canary" that makes sure that we can't enter
+    # script-environments that have previously been freed.
+    current_core = weakref.ref(get_core())
+
+    @contextmanager
+    def _change_environment():
+        core = current_core()
+        if core is None or _cores.get(environment, None) is not core:
+            raise RuntimeError("The target  environment does not exist anymore.")
+
+        with within_environment(environment):
+            yield
+
+    return _change_environment
 
 
 # Create an empty list whose instance will represent a not passed value.

@@ -203,7 +203,15 @@ Classes and Functions
    Creates a *inspect.Signature* object for the given registration signature.
    
    If *injected* is not None, the default of the first argument of the signature will be replaced with the value supplied with injected.
-   
+
+.. py:function:: get_environment()
+
+   Creates a factory for context-managers that return you to the VSScript-Environment this function was called in and is intended to be a cheaper
+   alternative than actually evaluating a script.
+
+   This function is intended to be used in Applications that directly interact with multiple VSScript-Environments.
+
+   Do not use if you don't know what you're doing.
 
 .. py:class:: Core
 
