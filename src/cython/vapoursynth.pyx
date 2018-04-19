@@ -32,6 +32,8 @@ import gc
 import sys
 import inspect
 from types import MappingProxyType
+from contextlib import contextmanager
+from collections import namedtuple
 from collections.abc import Iterable, Mapping
 from fractions import Fraction
 
@@ -44,18 +46,48 @@ except ImportError as e:
 
 
 _using_vsscript = False
-_environment_id_stack = []
-_environment_id = None
-_stored_outputs = {}
-_cores = {}
-_stored_output = {}
-_core = None
-_message_handler = None
+cdef list _environment_id_stack = []
+cdef object _environment_id = None
+cdef dict _stored_outputs = {}
+cdef dict _cores = {}
+cdef dict _stored_output = {}
+cdef Core _core = None
+cdef object _message_handler = None
 cdef const VSAPI *_vsapi = NULL
+
+
+@contextmanager
+cdef within_environment(newEnvironmentId):
+    if not _using_vsscript:
+        # Ignore this function if we are not using VSScript.
+        return (yield)
+
+    global _environment_id
+    global _environment_id_stack
+    _environment_id_stack.append(_environment_id)
+    _environment_id = newEnvironmentId
+
+    try:
+        yield
+    finally:
+        _environment_id = _environment_id_stack.pop()
+
+
+def _environment():
+    """
+    This function is for Python-based VSScript-Editors. It allows to easily
+    switch to a different environment depending.
+
+    This function gives you great power, use it wisely. :)
+    """
+    return lambda: within_environment(_environment_id)
 
 
 # Create an empty list whose instance will represent a not passed value.
 _EMPTY = []
+
+AlphaOutputTuple = namedtuple("AlphaOutputTuple", "clip alpha")
+
 
 def _construct_parameter(signature):
     name,type,*opt = signature.split(":")
@@ -180,7 +212,7 @@ def get_output(int index = 0):
 
 cdef class FuncData(object):
     cdef object func
-    cdef Core core
+    cdef VSCore *core
     cdef int id
     
     def __init__(self):
@@ -189,7 +221,7 @@ cdef class FuncData(object):
     def __call__(self, **kwargs):
         return self.func(**kwargs)
 
-cdef FuncData createFuncData(object func, Core core, int id):
+cdef FuncData createFuncData(object func, VSCore *core, int id):
     cdef FuncData instance = FuncData.__new__(FuncData)
     instance.func = func
     instance.core = core
@@ -215,21 +247,21 @@ cdef class Func(object):
         outm = self.funcs.createMap()
         inm = self.funcs.createMap()
         try:
-            dictToMap(kwargs, inm, None, vsapi)
+            dictToMap(kwargs, inm, NULL, vsapi)
             self.funcs.callFunc(self.ref, inm, outm, NULL, NULL)
             error = self.funcs.getError(outm)
             if error:
                 raise Error(error.decode('utf-8'))
-            ret = mapToDict(outm, False, False, None, vsapi)
+            ret = mapToDict(outm, False, False, NULL, vsapi)
             if not isinstance(ret, dict):
                 ret = {'val':ret}
         finally:
             vsapi.freeMap(outm)
             vsapi.freeMap(inm)
         
-cdef Func createFuncPython(object func, Core core):
+cdef Func createFuncPython(object func, VSCore *core, const VSAPI *funcs):
     cdef Func instance = Func.__new__(Func)
-    instance.funcs = core.funcs
+    instance.funcs = funcs
     if _using_vsscript:
         global _environment_id
         if _environment_id is None:
@@ -238,7 +270,7 @@ cdef Func createFuncPython(object func, Core core):
     else:
         fdata = createFuncData(func, core, 0)
     Py_INCREF(fdata)
-    instance.ref = instance.funcs.createFunc(publicFunction, <void *>fdata, freeFunc, core.core, core.funcs)
+    instance.ref = instance.funcs.createFunc(publicFunction, <void *>fdata, freeFunc, core, funcs)
     return instance
         
 cdef Func createFuncRef(VSFuncRef *ref, const VSAPI *funcs):
@@ -345,7 +377,7 @@ cdef void __stdcall frameDoneCallbackRaw(void *data, const VSFrameRef *f, int n,
             result = Error(result)
 
         else:
-            result = createConstVideoFrame(f, d.funcs, d.node.core)
+            result = createConstVideoFrame(f, d.funcs, d.node.core.core)
 
         try:
             d.receive(n, result)
@@ -372,7 +404,7 @@ cdef void __stdcall frameDoneCallbackOutput(void *data, const VSFrameRef *f, int
             d.error = 'Failed to retrieve frame ' + str(n) + ' with error: ' + errormsg.decode('utf-8')
         d.output += 1
     else:
-        d.reorder[n] = createConstVideoFrame(f, d.funcs, d.node.core)
+        d.reorder[n] = createConstVideoFrame(f, d.funcs, d.node.core.core)
 
         while d.output in d.reorder:
             frame_obj = <VideoFrame>d.reorder[d.output]
@@ -405,7 +437,7 @@ cdef void __stdcall frameDoneCallbackOutput(void *data, const VSFrameRef *f, int
     d.condition.release()
 
 
-cdef object mapToDict(const VSMap *map, bint flatten, bint add_cache, Core core, const VSAPI *funcs):
+cdef object mapToDict(const VSMap *map, bint flatten, bint add_cache, VSCore *core, const VSAPI *funcs):
     cdef int numKeys = funcs.propNumKeys(map)
     retdict = {}
     cdef const char *retkey
@@ -423,10 +455,11 @@ cdef object mapToDict(const VSMap *map, bint flatten, bint add_cache, Core core,
             elif proptype == 's':
                 newval = funcs.propGetData(map, retkey, y, NULL)
             elif proptype =='c':
-                newval = createVideoNode(funcs.propGetNode(map, retkey, y, NULL), funcs, core)
+                c = get_core()
+                newval = createVideoNode(funcs.propGetNode(map, retkey, y, NULL), funcs, c)
 
                 if add_cache and not (newval.flags & vapoursynth.nfNoCache):
-                    newval = core.std.Cache(clip=newval)
+                    newval = c.std.Cache(clip=newval)
 
                     if isinstance(newval, dict):
                         newval = newval['dict']
@@ -453,7 +486,7 @@ cdef object mapToDict(const VSMap *map, bint flatten, bint add_cache, Core core,
     else:
         return retdict
 
-cdef void dictToMap(dict ndict, VSMap *inm, Core core, const VSAPI *funcs) except *:
+cdef void dictToMap(dict ndict, VSMap *inm, VSCore *core, const VSAPI *funcs) except *:
     for key in ndict:
         ckey = key.encode('utf-8')
         val = ndict[key]
@@ -477,7 +510,7 @@ cdef void dictToMap(dict ndict, VSMap *inm, Core core, const VSAPI *funcs) excep
                 if funcs.propSetFunc(inm, ckey, (<Func>v).ref, 1) != 0:
                     raise Error('not all values are of the same type in ' + key)
             elif callable(v):
-                tf = createFuncPython(v, core)
+                tf = createFuncPython(v, core, funcs)
 
                 if funcs.propSetFunc(inm, ckey, tf.ref, 1) != 0:
                     raise Error('not all values are of the same type in ' + key)
@@ -499,7 +532,7 @@ cdef void dictToMap(dict ndict, VSMap *inm, Core core, const VSAPI *funcs) excep
                 raise Error('argument ' + key + ' was passed an unsupported type (' + type(v).__name__ + ')')
 
 
-cdef void typedDictToMap(dict ndict, dict atypes, VSMap *inm, Core core, const VSAPI *funcs) except *:
+cdef void typedDictToMap(dict ndict, dict atypes, VSMap *inm, VSCore *core, const VSAPI *funcs) except *:
     for key in ndict:
         ckey = key.encode('utf-8')
         val = ndict[key]
@@ -520,7 +553,7 @@ cdef void typedDictToMap(dict ndict, dict atypes, VSMap *inm, Core core, const V
                 if funcs.propSetFunc(inm, ckey, (<Func>v).ref, 1) != 0:
                     raise Error('not all values are of the same type in ' + key)
             elif atypes[key][:4] == 'func' and callable(v):
-                tf = createFuncPython(v, core)
+                tf = createFuncPython(v, core, funcs)
                 if funcs.propSetFunc(inm, ckey, tf.ref, 1) != 0:
                     raise Error('not all values are of the same type in ' + key)
             elif atypes[key][:3] == 'int':
@@ -617,7 +650,7 @@ cdef Format createFormat(const VSFormat *f):
 cdef class VideoProps(object):
     cdef const VSFrameRef *constf
     cdef VSFrameRef *f
-    cdef Core core
+    cdef VSCore *core
     cdef const VSAPI *funcs
     cdef bint readonly
 
@@ -661,7 +694,7 @@ cdef class VideoProps(object):
                 ol.append(data[:self.funcs.propGetDataSize(m, b, i, NULL)])
         elif t == 'c':
             for i in range(numelem):
-                ol.append(createVideoNode(self.funcs.propGetNode(m, b, i, NULL), self.funcs, self.core))
+                ol.append(createVideoNode(self.funcs.propGetNode(m, b, i, NULL), self.funcs, get_core()))
         elif t == 'v':
             for i in range(numelem):
                 ol.append(createConstVideoFrame(self.funcs.propGetFrame(m, b, i, NULL), self.funcs, self.core))
@@ -701,7 +734,7 @@ cdef class VideoProps(object):
                     if funcs.propSetFunc(m, b, (<Func>v).ref, 1) != 0:
                         raise Error('Not all values are of the same type')
                 elif callable(v):
-                    tf = createFuncPython(v, self.core)
+                    tf = createFuncPython(v, self.core, self.funcs)
                     if funcs.propSetFunc(m, b, tf.ref, 1) != 0:
                         raise Error('Not all values are of the same type')
                 elif isinstance(v, int):
@@ -852,7 +885,7 @@ Mapping.register(VideoProps)
 cdef class VideoFrame(object):
     cdef const VSFrameRef *constf
     cdef VSFrameRef *f
-    cdef Core core
+    cdef VSCore *core
     cdef const VSAPI *funcs
     cdef readonly Format format
     cdef readonly int width
@@ -869,7 +902,7 @@ cdef class VideoFrame(object):
         self.funcs.freeFrame(self.constf)
 
     def copy(self):
-        return createVideoFrame(self.funcs.copyFrame(self.constf, self.core.core), self.funcs, self.core)
+        return createVideoFrame(self.funcs.copyFrame(self.constf, self.core), self.funcs, self.core)
 
     def get_read_ptr(self, int plane):
         if plane < 0 or plane >= self.format.num_planes:
@@ -953,7 +986,7 @@ cdef class VideoFrame(object):
         return s
 
 
-cdef VideoFrame createConstVideoFrame(const VSFrameRef *constf, const VSAPI *funcs, Core core):
+cdef VideoFrame createConstVideoFrame(const VSFrameRef *constf, const VSAPI *funcs, VSCore *core):
     cdef VideoFrame instance = VideoFrame.__new__(VideoFrame)
     instance.constf = constf
     instance.f = NULL
@@ -964,11 +997,10 @@ cdef VideoFrame createConstVideoFrame(const VSFrameRef *constf, const VSAPI *fun
     instance.width = funcs.getFrameWidth(constf, 0)
     instance.height = funcs.getFrameHeight(constf, 0)
     instance.props = createVideoProps(instance)
-
     return instance
 
 
-cdef VideoFrame createVideoFrame(VSFrameRef *f, const VSAPI *funcs, Core core):
+cdef VideoFrame createVideoFrame(VSFrameRef *f, const VSAPI *funcs, VSCore *core):
     cdef VideoFrame instance = VideoFrame.__new__(VideoFrame)
     instance.constf = f
     instance.f = f
@@ -979,7 +1011,6 @@ cdef VideoFrame createVideoFrame(VSFrameRef *f, const VSAPI *funcs, Core core):
     instance.width = funcs.getFrameWidth(f, 0)
     instance.height = funcs.getFrameHeight(f, 0)
     instance.props = createVideoProps(instance)
-
     return instance
 
 
@@ -1121,7 +1152,7 @@ cdef class VideoNode(object):
             else:
                 raise Error('Internal error - no error given')
         else:
-            return createConstVideoFrame(f, self.funcs, self.core)
+            return createConstVideoFrame(f, self.funcs, self.core.core)
 
     def get_frame_async_raw(self, int n, object cb, object future_wrapper=None):
         self.ensure_valid_frame_number(n)
@@ -1143,8 +1174,23 @@ cdef class VideoNode(object):
 
         return fut
 
-    def set_output(self, int index = 0):
-        _get_output_dict("set_output")[index] = self
+    def set_output(self, int index = 0, VideoNode alpha = None):
+        cdef const VSFormat *aformat = NULL
+        clip = self
+        if alpha is not None:
+            if (self.vi.width != alpha.vi.width) or (self.vi.height != alpha.vi.height):
+                raise Error('Alpha clip dimensions must match the main video')
+            if (self.num_frames != alpha.num_frames):
+                raise Error('Alpha clip length must match the main video')
+            if (self.vi.format) and (alpha.vi.format):
+                if (alpha.vi.format != self.funcs.registerFormat(GRAY, self.vi.format.sampleType, self.vi.format.bitsPerSample, 0, 0, self.core.core)):
+                    raise Error('Alpha clip format must match the main video')
+            elif (self.vi.format) or (alpha.vi.format):
+                raise Error('Format must be either known or unknown for both alpha and main clip')
+            
+            clip = AlphaOutputTuple(self, alpha)
+
+        _get_output_dict("set_output")[index] = clip
 
     def output(self, object fileobj not None, bint y4m = False, object progress_update = None, int prefetch = 0):
         if prefetch < 1:
@@ -1518,7 +1564,7 @@ def get_core(threads = None, add_cache = None, accept_lowercase = None):
             ret_core.accept_lowercase = accept_lowercase
     return ret_core
     
-cdef object vsscript_get_core_internal(int environment_id):
+cdef Core vsscript_get_core_internal(int environment_id):
     global _cores
     if not environment_id in _cores:
         _cores[environment_id] = createCore()
@@ -1699,7 +1745,7 @@ cdef class Function(object):
         dtomsuccess = True
         dtomexceptmsg = ''
         try:
-            typedDictToMap(processed, atypes, inm, self.plugin.core, self.funcs)
+            typedDictToMap(processed, atypes, inm, self.plugin.core.core, self.funcs)
         except Error as e:
             self.funcs.freeMap(inm)
             dtomsuccess = False
@@ -1721,7 +1767,7 @@ cdef class Function(object):
             self.funcs.freeMap(outm)
             raise Error(emsg.decode('utf-8'))
 
-        retdict = mapToDict(outm, True, self.plugin.core.add_cache, self.plugin.core, self.funcs)
+        retdict = mapToDict(outm, True, self.plugin.core.add_cache, self.plugin.core.core, self.funcs)
         self.funcs.freeMap(outm)
         return retdict
 
@@ -1737,30 +1783,23 @@ cdef Function createFunction(str name, str signature, Plugin plugin, const VSAPI
 
 cdef void __stdcall freeFunc(void *pobj) nogil:
     with gil:
-        fobj = <object>pobj
+        fobj = <FuncData>pobj
         Py_DECREF(fobj)
         fobj = None
 
 cdef void __stdcall publicFunction(const VSMap *inm, VSMap *outm, void *userData, VSCore *core, const VSAPI *vsapi) nogil:
     with gil:
-        global _environment_id
-        global _environment_id_stack
-    
         d = <FuncData>userData
-        _environment_id_stack.append(_environment_id)
-        _environment_id = d.id
-   
-        try:
-            m = mapToDict(inm, False, False, d.core, vsapi)
-            ret = d(**m)
-            if not isinstance(ret, dict):
-                ret = {'val':ret}
-            dictToMap(ret, outm, d.core, vsapi)
-        except BaseException, e:
-            emsg = str(e).encode('utf-8')
-            vsapi.setError(outm, emsg)
-        finally:
-            _environment_id = _environment_id_stack.pop()
+        with within_environment(d.id):
+            try:
+                m = mapToDict(inm, False, False, core, vsapi)
+                ret = d(**m)
+                if not isinstance(ret, dict):
+                    ret = {'val':ret}
+                dictToMap(ret, outm, core, vsapi)
+            except BaseException, e:
+                emsg = str(e).encode('utf-8')
+                vsapi.setError(outm, emsg)
 
 # for whole script evaluation and export
 cdef public struct VPYScriptExport:
@@ -1793,58 +1832,54 @@ cdef public api int vpy_createScript(VPYScriptExport *se) nogil:
     
 cdef public api int vpy_evaluateScript(VPYScriptExport *se, const char *script, const char *scriptFilename, int flags) nogil:
     with gil:
-        global _environment_id
-        global _environment_id_stack
-        _environment_id_stack.append(_environment_id)
-        _environment_id = se.id
-        orig_path = None
-        try:
-            evaldict = {}
-            if se.pyenvdict:
-                evaldict = <dict>se.pyenvdict
-            else:
-                Py_INCREF(evaldict)
-                se.pyenvdict = <void *>evaldict
-                global _stored_outputs
-                _stored_outputs[se.id] = {}
+        with within_environment(se.id):
+            orig_path = None
+            try:
+                evaldict = {}
+                if se.pyenvdict:
+                    evaldict = <dict>se.pyenvdict
+                else:
+                    Py_INCREF(evaldict)
+                    se.pyenvdict = <void *>evaldict
+                    global _stored_outputs
+                    _stored_outputs[se.id] = {}
 
-            fn = scriptFilename.decode('utf-8')
+                fn = scriptFilename.decode('utf-8')
 
-            # don't set a filename if NULL is passed
-            if fn != '<string>':
-                abspath = os.path.abspath(fn)
-                evaldict['__file__'] = abspath
-                if flags & 1:
-                    orig_path = os.getcwd()
-                    os.chdir(os.path.dirname(abspath))
+                # don't set a filename if NULL is passed
+                if fn != '<string>':
+                    abspath = os.path.abspath(fn)
+                    evaldict['__file__'] = abspath
+                    if flags & 1:
+                        orig_path = os.getcwd()
+                        os.chdir(os.path.dirname(abspath))
 
-            evaldict['__name__'] = "__vapoursynth__"
-            
-            if se.errstr:
-                errstr = <bytes>se.errstr
-                se.errstr = NULL
-                Py_DECREF(errstr)
-                errstr = None
+                evaldict['__name__'] = "__vapoursynth__"
 
-            comp = compile(script.decode('utf-8-sig'), fn, 'exec')
-            exec(comp) in evaldict
+                if se.errstr:
+                    errstr = <bytes>se.errstr
+                    se.errstr = NULL
+                    Py_DECREF(errstr)
+                    errstr = None
 
-        except BaseException, e:
-            errstr = 'Python exception: ' + str(e) + '\n\n' + traceback.format_exc()
-            errstr = errstr.encode('utf-8')
-            Py_INCREF(errstr)
-            se.errstr = <void *>errstr
-            return 2
-        except:
-            errstr = 'Unspecified Python exception' + '\n\n' + traceback.format_exc()
-            errstr = errstr.encode('utf-8')
-            Py_INCREF(errstr)
-            se.errstr = <void *>errstr
-            return 1
-        finally:
-            _environment_id = _environment_id_stack.pop()
-            if orig_path is not None:
-                os.chdir(orig_path)
+                comp = compile(script.decode('utf-8-sig'), fn, 'exec')
+                exec(comp) in evaldict
+
+            except BaseException, e:
+                errstr = 'Python exception: ' + str(e) + '\n\n' + traceback.format_exc()
+                errstr = errstr.encode('utf-8')
+                Py_INCREF(errstr)
+                se.errstr = <void *>errstr
+                return 2
+            except:
+                errstr = 'Unspecified Python exception' + '\n\n' + traceback.format_exc()
+                errstr = errstr.encode('utf-8')
+                Py_INCREF(errstr)
+                se.errstr = <void *>errstr
+                return 1
+            finally:
+                if orig_path is not None:
+                    os.chdir(orig_path)
         return 0
 
 cdef public api int vpy_evaluateFile(VPYScriptExport *se, const char *scriptFilename, int flags) nogil:
@@ -1914,7 +1949,31 @@ cdef public api VSNodeRef *vpy_getOutput(VPYScriptExport *se, int index) nogil:
         except:
             return NULL
 
+        if isinstance(node, AlphaOutputTuple):
+            node = node[0]
+            
         if isinstance(node, VideoNode):
+            return (<VideoNode>node).funcs.cloneNodeRef((<VideoNode>node).node)
+        else:
+            return NULL
+            
+cdef public api VSNodeRef *vpy_getOutput2(VPYScriptExport *se, int index, VSNodeRef **alpha) nogil:
+    if (alpha != NULL):
+        alpha[0] = NULL
+    with gil:
+        evaldict = <dict>se.pyenvdict
+        node = None
+        try:
+            global _stored_outputs
+            node = _stored_outputs[se.id][index]
+        except:
+            return NULL
+   
+        if isinstance(node, AlphaOutputTuple):
+            if (isinstance(node[1], VideoNode) and (alpha != NULL)):
+                alpha[0] = (<VideoNode>(node[1])).funcs.cloneNodeRef((<VideoNode>(node[1])).node)
+            return (<VideoNode>(node[0])).funcs.cloneNodeRef((<VideoNode>(node[0])).node)
+        elif isinstance(node, VideoNode):
             return (<VideoNode>node).funcs.cloneNodeRef((<VideoNode>node).node)
         else:
             return NULL
@@ -1944,9 +2003,16 @@ cdef public api const VSAPI *vpy_getVSApi() nogil:
     if _vsapi == NULL:
         _vsapi = getVapourSynthAPI(VAPOURSYNTH_API_VERSION)
     return _vsapi
+    
+cdef public api const VSAPI *vpy_getVSApi2(int version) nogil:
+    return getVapourSynthAPI(version)
 
 cdef public api int vpy_getVariable(VPYScriptExport *se, const char *name, VSMap *dst) nogil:
     with gil:
+        global _environment_id
+        global _environment_id_stack
+        _environment_id_stack.append(_environment_id)
+        _environment_id = se.id
         if vpy_getVSApi() == NULL:
             return 1
         evaldict = <dict>se.pyenvdict
@@ -1954,22 +2020,27 @@ cdef public api int vpy_getVariable(VPYScriptExport *se, const char *name, VSMap
             dname = name.decode('utf-8')
             read_var = { dname:evaldict[dname]}
             core = vsscript_get_core_internal(se.id)
-            dictToMap(read_var, dst, core, vpy_getVSApi())
+            dictToMap(read_var, dst, core.core, vpy_getVSApi())
             return 0
         except:
             return 1
+        finally:
+            _environment_id = _environment_id_stack.pop()    
 
 cdef public api int vpy_setVariable(VPYScriptExport *se, const VSMap *vars) nogil:
     with gil:
-        if vpy_getVSApi() == NULL:
-            return 1
-        evaldict = <dict>se.pyenvdict
-        
-        core = vsscript_get_core_internal(se.id)
-        new_vars = mapToDict(vars, False, False, core, vpy_getVSApi())
-        for key in new_vars:
-            evaldict[key] = new_vars[key]
-        return 0
+        with within_environment(se.id):
+            if vpy_getVSApi() == NULL:
+                return 1
+            evaldict = <dict>se.pyenvdict
+            try:
+                core = vsscript_get_core_internal(se.id)
+                new_vars = mapToDict(vars, False, False, core.core, vpy_getVSApi())
+                for key in new_vars:
+                    evaldict[key] = new_vars[key]
+                return 0
+            except:
+                return 1
 
 cdef public api int vpy_clearVariable(VPYScriptExport *se, const char *name) nogil:
     with gil:
