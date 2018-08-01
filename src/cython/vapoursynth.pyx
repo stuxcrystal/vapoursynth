@@ -19,6 +19,8 @@
 
 cimport vapoursynth
 cimport cython.parallel
+from cpython.objects cimport Py_EQ, Py_NE
+
 from cython cimport view
 from libc.stdint cimport intptr_t, uint16_t, uint32_t
 from cpython.buffer cimport (PyBUF_WRITABLE, PyBUF_FORMAT, PyBUF_STRIDES,
@@ -130,7 +132,14 @@ cdef class Environment(object):
             return
         _environment_state.current = _env_current_stack().pop()
 
-    def __eq__(self, other):
+    def __richcmp__(self, other, op):
+        if op == Py_EQ:
+            return self._eq(other)
+        elif op == Py_NE:
+            return not self._eq(other)
+        raise NotImplemented
+        
+    def _eq(self, other):
         if not isinstance(other, Environment):
             return False
         if self.single:
