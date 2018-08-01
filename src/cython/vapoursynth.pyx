@@ -137,7 +137,7 @@ cdef class Environment(object):
             return self._eq(other)
         elif op == Py_NE:
             return not self._eq(other)
-        raise NotImplemented
+        return NotImplemented
         
     def _eq(self, other):
         if not isinstance(other, Environment):
