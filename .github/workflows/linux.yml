@@ -51,5 +51,5 @@ jobs:
         pip install .
     - run: |
         python -m unittest discover -s ./test/
-        echo 'import unittest, vapoursynth, sys;sys.exit(not unittest.TextTestRunner().run(unittest.TestLoader().discover("test/")).wasSuccessful())' > run_tests.vpy
+        echo 'import unittest, vapoursynth, sys;sif not unittest.TextTestRunner().run(unittest.TestLoader().discover("test/")).wasSuccessful():raise RuntimeError("The tests have failed");' > run_tests.vpy
         vspipe run_tests.vpy . --info
