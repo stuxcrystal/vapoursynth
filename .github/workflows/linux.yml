@@ -49,4 +49,7 @@ jobs:
       run: |
         sudo make install
         pip install .
-    - run: python -m unittest discover -s ./test/
+    - run: |
+        python -m unittest discover -s ./test/
+        echo 'import unittest, vapoursynth, sys;sys.exit(not unittest.TextTestRunner().run(unittest.TestLoader().discover("test/")).wasSuccessful())' > run_tests.vpy
+        vspipe --info run_tests
